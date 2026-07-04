@@ -10,7 +10,8 @@ Everything named `changeme` is placeholder scaffolding: rename it into the first
    - `domain/` imports only the stdlib and `go-kernel/ddd`. No infra, no HTTP, no sql.
    - `application/` imports domain and ports — never `adapters/` or `shared/infra/`.
    - Features never import other features; cross-feature needs go through `internal/shared/ports/`.
-   - Transport frameworks stay inside their adapters (`gin.Context` never leaves `adapters/rest/`; proto types never leave `adapters/grpc/`); use-cases take `context.Context` + typed arguments.
+   - Transport frameworks stay inside their adapters (`gin.Context` never leaves `adapters/rest/`; proto types never leave `adapters/grpc/`; tea types never leave `adapters/tui/`); use-cases take `context.Context` + typed arguments.
+   - Presentation binaries are composition roots: `cmd/app` (server) and `cmd/tui` (terminal) share features via `Feature.UseCases`; new presentation = new `cmd/` + adapter, never a fork of the feature.
    - Queries go through Reader ports and read-models — never through repositories.
 2. **Invariants live in aggregate methods** — never duplicated in use-cases or handlers. Expected business failures are `ddd.DomainError` values; transports map them (`httpapi.WithErrorStatus` for non-400s).
 3. **Schema changes are migrations** in `internal/shared/infra/storage/migrations/` — numbered, up-only, never edited after commit.

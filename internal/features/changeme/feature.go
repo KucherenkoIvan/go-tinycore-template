@@ -15,9 +15,11 @@ import (
 	"github.com/KucherenkoIvan/go-tinycore-template/internal/features/changeme/application/usecases/managechangeme"
 )
 
-// Feature is what the composition root (cmd/app/main.go) sees: the transport
-// adapters to mount.
+// Feature is what a composition root sees: the application surface and the
+// transport adapters built on it. Different binaries mount different parts —
+// cmd/app uses Handlers + GRPC, cmd/tui builds its UI over UseCases.
 type Feature struct {
+	UseCases managechangeme.UseCases
 	Handlers *rest.Handlers                  // r.Group("/api") → Handlers.RegisterRoutes
 	GRPC     *grpcadapter.ChangeMeController // changemev1.RegisterChangeMeServiceServer(srv, GRPC)
 }
@@ -32,17 +34,20 @@ func New(db *kernelsqlite.Client, pub *events.ChannelPublisher) *Feature {
 	var txManager ddd.TxManager = db
 
 	// use-cases
-	create := managechangeme.NewCreateCommand(txManager, ddd.UUIDv7Generator{}, ddd.SystemClock{}, repo, producer)
-	update := managechangeme.NewUpdateCommand(txManager, repo, producer)
-	del := managechangeme.NewDeleteCommand(txManager, repo, producer)
-	get := managechangeme.NewGetQuery(reader)
-	list := managechangeme.NewListQuery(reader)
+	uc := managechangeme.UseCases{
+		Create: managechangeme.NewCreateCommand(txManager, ddd.UUIDv7Generator{}, ddd.SystemClock{}, repo, producer),
+		Update: managechangeme.NewUpdateCommand(txManager, repo, producer),
+		Delete: managechangeme.NewDeleteCommand(txManager, repo, producer),
+		Get:    managechangeme.NewGetQuery(reader),
+		List:   managechangeme.NewListQuery(reader),
+	}
 
 	// async reactions go here when they appear:
 	// pub.Subscribe(events.Handler{Name: "...", Events: []string{...}, Handle: ...})
 
 	return &Feature{
-		Handlers: rest.NewHandlers(create, update, del, get, list),
-		GRPC:     grpcadapter.NewChangeMeController(create, update, del, get, list),
+		UseCases: uc,
+		Handlers: rest.NewHandlers(uc.Create, uc.Update, uc.Delete, uc.Get, uc.List),
+		GRPC:     grpcadapter.NewChangeMeController(uc.Create, uc.Update, uc.Delete, uc.Get, uc.List),
 	}
 }
