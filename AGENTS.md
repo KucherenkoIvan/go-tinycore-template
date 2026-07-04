@@ -10,11 +10,12 @@ Everything named `changeme` is placeholder scaffolding: rename it into the first
    - `domain/` imports only the stdlib and `go-kernel/ddd`. No infra, no HTTP, no sql.
    - `application/` imports domain and ports — never `adapters/` or `shared/infra/`.
    - Features never import other features; cross-feature needs go through `internal/shared/ports/`.
-   - When a transport adapter appears, its framework types stay inside it (`gin.Context` never leaves `adapters/rest/`); use-cases take `context.Context` + typed arguments.
+   - Transport frameworks stay inside their adapters (`gin.Context` never leaves `adapters/rest/`; proto types never leave `adapters/grpc/`); use-cases take `context.Context` + typed arguments.
+   - Queries go through Reader ports and read-models — never through repositories.
 2. **Invariants live in aggregate methods** — never duplicated in use-cases or handlers. Expected business failures are `ddd.DomainError` values; transports map them (`httpapi.WithErrorStatus` for non-400s).
 3. **Schema changes are migrations** in `internal/shared/infra/storage/migrations/` — numbered, up-only, never edited after commit.
 4. **There is no CI — you are the CI.** `make lint` and `make test` must pass before every commit. Tests use real components (`:memory:` sqlite, the channel publisher) — prefer them over mocks; port fakes are hand-written maps, not mock frameworks.
-5. **New feature checklist**: copy the `changeme/` layout (domain → ports → use-cases → adapters → `feature.go`), add its migration, wire it in `cmd/app/main.go`, register health checks for any new infra, add tests at domain and feature altitude.
+5. **New feature checklist**: copy the `changeme/` layout (domain → ports → use-cases → adapters → `feature.go`), add its migration, define its gRPC contract (own proto — the changeme contract in the kernel is template scaffolding), wire routes/registration and domain-error mappings (`WithErrorStatus`/`WithErrorCode`) in `cmd/app/main.go`, register health checks for any new infra, add tests at domain and transport altitude.
 
 ## Conventions
 

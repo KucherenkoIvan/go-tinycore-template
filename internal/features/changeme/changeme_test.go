@@ -2,39 +2,23 @@ package changeme_test
 
 import (
 	"context"
-	"errors"
-	"io"
-	"log/slog"
+	"encoding/json"
+	"net/http"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/KucherenkoIvan/go-kernel/ddd"
 	"github.com/KucherenkoIvan/go-kernel/events"
 
-	"github.com/KucherenkoIvan/go-tinycore-template/internal/features/changeme"
-	sqliteadapter "github.com/KucherenkoIvan/go-tinycore-template/internal/features/changeme/adapters/sqlite"
 	"github.com/KucherenkoIvan/go-tinycore-template/internal/features/changeme/domain"
-	"github.com/KucherenkoIvan/go-tinycore-template/internal/shared/infra/storage"
 )
 
-// The CRUD flow over real components: in-memory sqlite with real migrations,
-// the real channel publisher — no mocks. This is the test shape to keep for
-// real features.
-func TestCRUDFlow(t *testing.T) {
-	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ctx := context.Background()
+// Domain events through the whole stack: HTTP request → command → commit →
+// channel publisher → subscriber. Close drains synchronously, so no polling.
+func TestEventFlow(t *testing.T) {
+	feature, pub := setupFeatureWithPub(t)
+	api := newRESTHelper(t, feature)
 
-	db, err := storage.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	pub := events.NewChannelPublisher(events.WithLogger(discard))
-
-	// a test subscriber recording delivered events (registered before the
-	// feature so ordering mirrors production wiring)
 	var mu sync.Mutex
 	var seen []string
 	pub.Subscribe(events.Handler{
@@ -47,53 +31,19 @@ func TestCRUDFlow(t *testing.T) {
 		},
 	})
 
-	feature := changeme.New(db, pub)
-	repo := sqliteadapter.NewChangeMeRepository(db) // direct adapter access for state asserts
+	w := api("POST", "/api/changeme", `{"name": "first"}`)
+	var created struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
 
-	// create
-	id, err := feature.Create.Execute(ctx, "first")
-	if err != nil {
+	api("PUT", "/api/changeme/"+created.ID, `{"name": "second"}`)
+	api("DELETE", "/api/changeme/"+created.ID, "")
+
+	if err := pub.Close(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	aggregate, err := repo.GetByID(ctx, ddd.NoTransaction, id)
-	if err != nil || aggregate == nil || aggregate.Snapshot().Name != "first" {
-		t.Fatalf("after create: %+v err=%v", aggregate, err)
-	}
 
-	// update
-	if err := feature.Update.Execute(ctx, id, "second"); err != nil {
-		t.Fatal(err)
-	}
-	aggregate, _ = repo.GetByID(ctx, ddd.NoTransaction, id)
-	if aggregate.Snapshot().Name != "second" {
-		t.Fatalf("after update: %+v", aggregate.Snapshot())
-	}
-
-	// domain errors propagate with their codes
-	if err := feature.Update.Execute(ctx, id, "  "); err == nil || !ddd.IsDomainError(err) {
-		t.Fatalf("blank update: %v", err)
-	}
-	var notFound *domain.ChangeMeNotFoundError
-	if err := feature.Update.Execute(ctx, "missing", "x"); !errors.As(err, &notFound) {
-		t.Fatalf("missing update: %v", err)
-	}
-
-	// delete
-	if err := feature.Delete.Execute(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	if aggregate, _ = repo.GetByID(ctx, ddd.NoTransaction, id); aggregate != nil {
-		t.Fatal("aggregate must be gone after delete")
-	}
-	if err := feature.Delete.Execute(ctx, id); !errors.As(err, &notFound) {
-		t.Fatalf("double delete: %v", err)
-	}
-
-	// commit-gated events were buffered on transactions; Close drains them
-	// synchronously — the create/update/delete facts, in order.
-	if err := pub.Close(ctx); err != nil {
-		t.Fatal(err)
-	}
 	mu.Lock()
 	defer mu.Unlock()
 	want := []string{domain.ChangeMeCreatedEventName, domain.ChangeMeUpdatedEventName, domain.ChangeMeDeletedEventName}
@@ -107,36 +57,32 @@ func TestCRUDFlow(t *testing.T) {
 	}
 }
 
-// Failed transactions must publish nothing (commit-gating).
+// Failed transactions publish nothing (commit-gating end to end).
 func TestNoGhostEvents(t *testing.T) {
-	discard := slog.New(slog.NewTextHandler(io.Discard, nil))
-	ctx := context.Background()
+	feature, pub := setupFeatureWithPub(t)
+	api := newRESTHelper(t, feature)
 
-	db, err := storage.Open(ctx, ":memory:")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
-	pub := events.NewChannelPublisher(events.WithLogger(discard))
-	var count int
 	var mu sync.Mutex
-	pub.Subscribe(events.Handler{Name: "counter", Handle: func(context.Context, ddd.DomainEvent) error {
-		mu.Lock()
-		defer mu.Unlock()
-		count++
-		return nil
-	}})
+	count := 0
+	pub.Subscribe(events.Handler{
+		Name: "counter",
+		Handle: func(context.Context, ddd.DomainEvent) error {
+			mu.Lock()
+			defer mu.Unlock()
+			count++
+			return nil
+		},
+	})
 
-	feature := changeme.New(db, pub)
-
-	if _, err := feature.Create.Execute(ctx, "keeper"); err != nil {
-		t.Fatal(err)
+	if w := api("POST", "/api/changeme", `{"name": "keeper"}`); w.Code != http.StatusCreated {
+		t.Fatalf("create: %d", w.Code)
 	}
-	_ = feature.Update.Execute(ctx, "missing", "x") // fails inside the tx
+	// the update command fails inside its transaction — its events must vanish
+	if w := api("PUT", "/api/changeme/missing", `{"name": "x"}`); w.Code != http.StatusNotFound {
+		t.Fatalf("update missing: %d", w.Code)
+	}
 
-	_ = pub.Close(ctx)
-	time.Sleep(10 * time.Millisecond)
+	_ = pub.Close(context.Background())
 	mu.Lock()
 	defer mu.Unlock()
 	if count != 1 {

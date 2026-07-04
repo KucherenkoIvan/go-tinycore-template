@@ -2,7 +2,7 @@
 
 A template for single-binary Go services on [go-kernel](https://github.com/KucherenkoIvan/go-kernel): DDD + hexagonal architecture in one static executable — embedded SQLite, commit-gated in-process events, graceful runtime, health endpoints. No containers, no external dependencies at runtime; the database is a file next to the binary.
 
-Everything named **`changeme`** is deliberate scaffolding, not a domain: a nameless aggregate with a placeholder field and invariant, CRUD commands, CRUD events, and a CRUD sqlite repository. It exists so your first real feature is a rename-and-fill, not a blank page — and so the wiring (transactions, event publishing, migrations, composition root) is already correct and tested. There are **no API endpoints yet**; the HTTP server serves only `/livez` and `/healthz` until you add a transport adapter.
+Everything named **`changeme`** is deliberate scaffolding, not a domain: a nameless aggregate with a placeholder field and invariant, CRUD commands + CRUD events, `get`/`list` queries through a reader, a sqlite repository — and both transports wired end to end: a REST CRUD API (Gin) and a gRPC service (contract in the kernel's `contracts/proto/grpc/changeme/v1`). It exists so your first real feature is a rename-and-fill, not a blank page — and so the wiring (transactions, event publishing, error mapping on both transports, migrations, composition root) is already correct and tested.
 
 ## Using the template
 
@@ -15,21 +15,34 @@ Everything named **`changeme`** is deliberate scaffolding, not a domain: a namel
 	git config --global url."git@github.com:KucherenkoIvan/".insteadOf "https://github.com/KucherenkoIvan/"
 	```
 
-4. `make test && make run` — then `curl localhost:8080/healthz`.
-5. Build your first feature by renaming `changeme` (aggregate, events, migration, tests), then add its transport adapter (`adapters/rest/`) and register routes in `main.go`.
+4. `make test && make run` — then try it:
+
+	```sh
+	curl localhost:8080/healthz
+	curl -X POST localhost:8080/api/changeme -d '{"name": "first"}'
+	curl localhost:8080/api/changeme               # list
+	curl localhost:8080/api/changeme/<id>          # single by id
+	curl -X PUT localhost:8080/api/changeme/<id> -d '{"name": "second"}'
+	curl -X DELETE localhost:8080/api/changeme/<id>
+	# the same service also speaks gRPC on :9090 (ChangeMeService)
+	```
+
+5. Build your first feature by renaming `changeme` everywhere: aggregate, events, migration, adapters, tests — and its gRPC contract (define your own proto; the changeme one lives in the kernel only so the template compiles out of the box).
 
 ## Layout
 
 ```
-cmd/app/main.go                     # composition root: config, storage, publisher, features, health, app.Run
+cmd/app/main.go                     # composition root: config, storage, publisher, features, transports, health, app.Run
 internal/
   shared/infra/storage/             # embedded DB + migrations (schema source of truth)
   features/changeme/                # placeholder feature — rename or copy, then delete
     feature.go                      #   composition root: port -> adapter wiring
-    domain/                         #   aggregate, CRUD events, domain errors
-    application/ports/              #   repository + event-producer contracts
-    application/usecases/managechangeme/  # create / update / delete commands
-    adapters/sqlite/                #   CRUD repository
+    domain/                         #   aggregate, CRUD events, read-model, domain errors
+    application/ports/              #   repository + reader + event-producer contracts
+    application/usecases/managechangeme/  # create/update/delete commands, get/list queries
+    adapters/sqlite/                #   repository + reader
+    adapters/rest/                  #   HTTP CRUD handlers (gin stays in here)
+    adapters/grpc/                  #   gRPC controller (proto mapping only)
 ```
 
 The architecture is documented in the kernel: [service structure](https://github.com/KucherenkoIvan/go-kernel/blob/master/docs/architecture/1-service-structure.md) → domain → application → infrastructure, plus per-package guides. `AGENTS.md` carries the operating rules for coding agents.
